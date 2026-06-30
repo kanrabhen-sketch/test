@@ -43,16 +43,40 @@ apps_script/Code.gs             Apps Script 모음
 - `refreshMissingCheck()` — `missing_check`의 HSTACK/LET 수식이 오류를 낼 경우 쓰는 스크립트 기반 대체본
 - `onOpen()` — 스프레드시트 메뉴에 "일매출관리" 메뉴 추가
 
+## 예시 데이터로 채워봤습니다
+
+빈 템플릿만으로는 작동 방식을 가늠하기 어려워서, `sales_logs` 2~5행에 이관 문서
+테스트 시나리오 데이터를 직접 넣어뒀습니다. Google Sheets로 열면 G/H/I열 수식이
+이 데이터를 자동으로 계산합니다. `사용예시_가이드` 탭(맨 앞)에 "Google Sheets로
+열었을 때 monthly_summary/missing_check에 어떤 값이 나와야 정상인지" 손계산 결과를
+정리해뒀으니, 실제로 연 결과와 비교해보면 수식이 제대로 작동하는지 바로 확인됩니다.
+
+실제 운영을 시작하기 전에는 이 예시 4줄을 지우고, `missing_check`의 B1을
+`=TODAY()`로 바꿔야 합니다(현재는 예시 비교를 위해 2026-06-01로 고정해둠).
+
+## Google Form, 실제로는 어떻게 만드나
+
+저(AI)는 구글 계정 로그인이나 OAuth 동의를 할 수 없는 환경이라 Form을 직접
+만들 수는 없습니다. 대신 **`apps_script/Code.gs`의 `createSalesForm()`을 동진님
+계정에서 한 번 실행하면, 동진님 권한으로 실제 Google Form이 코드로 자동 생성**됩니다.
+이 방식이 사람이 손으로 Form 질문을 하나씩 만드는 것보다 안전합니다(질문 순서/분기
+설정 실수가 없음). `stores` H열의 현재 값은 "형식 예시"일 뿐이며, `createSalesForm()`
+실행 시 실제 동작하는 pre-filled 링크로 자동 교체됩니다.
+
 ## 사용자가 해야 할 작업 (Google 계정에서만 가능)
 
 1. `output/일매출관리시스템_템플릿.xlsx`를 Google Drive에 업로드 → "Google Sheets로 열기"
-2. `stores` 탭 매장명 오타 확인 (이미지 기반 입력이라 원본 대조 필요)
-3. `sales_logs`에 이관 문서 11장 테스트 데이터 3~5줄 입력 → `monthly_summary`/`missing_check` 결과 확인
-4. Google Form 생성 (질문 순서: 매장코드→영업일→영업여부→일매출→특이사항, 섹션 분기 설정)
-5. Form 응답 시트를 `sales_logs`로 연결 (또는 응답 탭 이름을 `sales_logs`로 변경 후 G2/H2/I2 수식 재입력)
-6. Apps Script 편집기에 `apps_script/Code.gs` 붙여넣기 → `FORM_ENTRY_ID`/`FORM_BASE_URL` 교체 →
-   `generateStoreLinks` 실행 → stores H열에 매장별 링크 생성됨 → 점주에게 카카오톡 공유
-7. Form 트리거 연결: Apps Script 편집기 > 트리거 > `onFormSubmit` 추가 (이벤트: 양식 제출 시)
+2. `사용예시_가이드` 탭과 비교해서 monthly_summary/missing_check가 예상대로 나오는지 확인
+3. `stores` 탭 매장명 오타 확인 (이미지 기반 입력이라 원본 대조 필요)
+4. 확장자 도구 > Apps Script 편집기를 열고 `apps_script/Code.gs` 전체를 붙여넣기
+5. 메뉴 새로고침(시트 새로고침 또는 재실행 권한 승인) 후 "일매출관리 > 0. Google Form
+   실제로 생성하기" 실행 → 실제 Form 생성 + `sales_logs` 자동 재구성 + `stores` H열에
+   진짜 pre-filled 링크 자동 채움
+   - 실행 전 `sales_logs`에 남겨둔 예시 데이터(2~5행)는 백업하거나 지우고 실행할 것
+     (응답 탭이 새로 생기면서 기존 `sales_logs`를 대체하기 때문)
+6. 생성된 stores!H열 링크를 매장별로 점주에게 카카오톡 공유
+7. (선택) Apps Script 트리거 > `onFormSubmit` 함수를 "양식 제출 시" 트리거로 추가하면
+   응답이 들어올 때마다 확인여부(J열) 기본값과 중복 알림이 자동 처리됨
 
 ## 알려진 제약 / 확인 필요 사항
 

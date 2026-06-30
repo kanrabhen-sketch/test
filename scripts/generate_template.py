@@ -69,7 +69,16 @@ dv_status = DataValidation(type="list", formula1='"active,inactive"', allow_blan
 ws.add_data_validation(dv_status)
 dv_status.add(f"G2:G200")
 
-widths = [10, 14, 30, 12, 14, 8, 10, 40]
+# H열(입력링크) 예시: 실제 Form 생성 전이므로 "형식 예시"임을 표시.
+# apps_script/Code.gs의 createSalesForm() 실행 시 실제 prefilled URL로 자동 교체됨.
+for i, row in enumerate(STORES, start=2):
+    store_id = row[0]
+    ws.cell(row=i, column=8, value=(
+        f"(예시-형식만) https://docs.google.com/forms/d/e/FORM_ID/viewform"
+        f"?usp=pp_url&entry.123456789={store_id}"
+    ))
+
+widths = [10, 14, 30, 12, 14, 8, 10, 55]
 for i, w in enumerate(widths, start=1):
     ws.column_dimensions[get_column_letter(i)].width = w
 ws.freeze_panes = "A2"
@@ -83,6 +92,22 @@ headers = ["제출시간", "store_id", "영업일", "영업여부", "일매출",
 ws.append(headers)
 style_header_row(ws, 1, len(headers))
 
+import datetime as _dt
+
+# 이관 문서 11장 테스트 시나리오 + 예시 데이터(S003 추가) — A~F열만 채움.
+# G/H/I열은 수식 영역이므로 직접 값을 넣지 않는다(아래 ARRAYFORMULA/MAP이 전체 범위를 채움).
+TEST_ROWS = [
+    (_dt.datetime(2026, 6, 1, 22, 0), "S001", _dt.date(2026, 6, 1), "영업", 900000, "테스트1: 정상 입력"),
+    (_dt.datetime(2026, 6, 2, 22, 0), "S001", _dt.date(2026, 6, 2), "휴무", 0, "테스트2: 휴무"),
+    (_dt.datetime(2026, 6, 3, 22, 0), "S001", _dt.date(2026, 6, 1), "영업", 950000, "테스트3: 중복 입력(6/1 재입력)"),
+    (_dt.datetime(2026, 6, 1, 21, 30), "S003", _dt.date(2026, 6, 1), "영업", 650000, "예시: 다른 매장 정상 입력"),
+]
+for r_idx, row in enumerate(TEST_ROWS, start=2):
+    for c_idx, val in enumerate(row, start=1):
+        ws.cell(row=r_idx, column=c_idx, value=val)
+ws["C2"].number_format = ws["C3"].number_format = ws["C4"].number_format = ws["C5"].number_format = "yyyy-mm-dd"
+ws["A2"].number_format = ws["A3"].number_format = ws["A4"].number_format = ws["A5"].number_format = "yyyy-mm-dd hh:mm"
+
 ws["G2"] = '=ARRAYFORMULA(IF(A2:A="","","L"&TEXT(ROW(A2:A)-1,"0000")))'
 ws["H2"] = '=ARRAYFORMULA(IF(B2:B="","",IFERROR(VLOOKUP(B2:B,stores!$A:$C,3,0),"store_id 오류")))'
 ws["I2"] = ('=MAP(B2:B1000,C2:C1000,ROW(B2:B1000),'
@@ -90,7 +115,8 @@ ws["I2"] = ('=MAP(B2:B1000,C2:C1000,ROW(B2:B1000),'
             'IF(OR(store="",date=""),FALSE,'
             'COUNTIFS($B$2:INDEX($B:$B,rownum),store,'
             '$C$2:INDEX($C:$C,rownum),date)>1)))')
-ws["J2"] = False
+for r_idx in range(2, 2 + len(TEST_ROWS)):
+    ws.cell(row=r_idx, column=10, value=False)
 
 dv_status2 = DataValidation(type="list", formula1='"영업,휴무"', allow_blank=False)
 ws.add_data_validation(dv_status2)
@@ -282,7 +308,8 @@ ws.freeze_panes = "K4"
 ws = wb.create_sheet("missing_check")
 
 ws["A1"] = "확인일"
-ws["B1"] = "=TODAY()"
+# 예시 데이터 기준일로 고정(2026-06-01). 실제 운영 시 =TODAY() 로 바꿔서 매일 자동 갱신.
+ws["B1"] = _dt.date(2026, 6, 1)
 ws["A1"].font = Font(bold=True)
 ws["B1"].fill = SETTING_FILL
 ws["B1"].number_format = "yyyy-mm-dd"
@@ -323,6 +350,50 @@ widths = [14, 30, 14, 12, 40, 10]
 for i, w in enumerate(widths, start=1):
     ws.column_dimensions[get_column_letter(i)].width = w
 ws.freeze_panes = "A5"
+
+# ---------------------------------------------------------------------------
+# 5. 사용예시_가이드 — Excel/openpyxl은 Google Sheets 전용 함수(MAP/LET/HSTACK 등)를
+#    계산하지 못하므로, sales_logs에 넣어둔 예시 데이터가 실제 Google Sheets에서
+#    열렸을 때 monthly_summary/missing_check에 어떤 값으로 나와야 하는지를
+#    미리 손으로 계산해서 정리해둔 가이드 탭. (실제 계산은 Google Sheets에서 일어남)
+# ---------------------------------------------------------------------------
+ws = wb.create_sheet("사용예시_가이드", 0)
+ws.column_dimensions["A"].width = 95
+guide_lines = [
+    "■ 이 파일에는 이미 예시(테스트) 데이터가 들어가 있습니다.",
+    "  sales_logs 탭 2~5행: S001 6/1 영업 90만원, S001 6/2 휴무, S001 6/1 영업 95만원(중복),"
+    " S003 6/1 영업 65만원",
+    "",
+    "■ Google Sheets로 열면 자동으로 계산되어야 하는 값 (monthly_summary, C1=2026/E1=6 기준)",
+    "  S001 행: 월매출 900,000 / 영업일수 1 / 휴무일수 1 / 일평균 900,000",
+    "           K열(1일)=\"중복확인\"(빨간 배경) / L열(2일)=\"휴무\"(회색 배경)",
+    "           나머지 입력 안 한 날짜 = \"미입력\"(노란 배경), 6월에 없는 날(31일) = \"---\"",
+    "  S003 행: 월매출 650,000 / 영업일수 1 / K열(1일)=650000",
+    "  S002, S004~S018 행: 입력 데이터 없음 → 모든 날짜 \"미입력\", 월매출 0",
+    "",
+    "■ Google Sheets로 열면 자동으로 계산되어야 하는 값 (missing_check, B1=2026-06-01 기준)",
+    "  오늘 제출 수(B2) = 2  (S001, S003가 6/1에 제출함)",
+    "  미제출 수(D2) = 16  (active 매장 18개 - 2개)",
+    "  A5 이하 목록: S002, S004~S018 (S001, S003 제외) 16개 매장이 자동으로 나열되어야 함",
+    "",
+    "■ sales_logs 탭에서 직접 확인할 것",
+    "  3행(S001 6/1 95만원, 중복테스트): I열(중복여부) = TRUE, 배경 빨간색",
+    "  1행/2행(S001): I열 = FALSE",
+    "  4행(S003): I열 = FALSE",
+    "",
+    "■ 만약 위 값과 다르게 나온다면",
+    "  1) C1/E1(기준연도/월)이 2026/6으로 되어 있는지, B1(missing_check)이 2026-06-01인지 확인",
+    "  2) sales_logs C열(영업일)이 '날짜' 형식인지(텍스트로 들어가면 SUMIFS/COUNTIFS가 안 됨)",
+    "  3) stores G열 상태가 정확히 소문자 'active'인지 확인",
+    "  4) missing_check A5가 #ERROR!면 apps_script/Code.gs의 refreshMissingCheck()로 대체",
+    "",
+    "■ 실제 매출 데이터가 들어오면",
+    "  이 4줄의 예시 데이터(sales_logs 2~5행)는 지우고 실제 Form 응답으로 채워야 합니다.",
+]
+for i, line in enumerate(guide_lines, start=1):
+    ws.cell(row=i, column=1, value=line)
+ws["A1"].font = Font(bold=True, size=13)
+ws.freeze_panes = "A2"
 
 # ---------------------------------------------------------------------------
 import sys
