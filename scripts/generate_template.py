@@ -1,14 +1,20 @@
 """
-일매출 관리 시스템 - Google Sheets용 xlsx 템플릿 생성기
-이관 문서(업무 이관 문서 — 일매출 관리 시스템) 기준으로 구현.
+일매출 관리 시스템 v2 - Google Sheets용 xlsx 템플릿 생성기
 
-주의: MAP / LET / HSTACK / FILTER / COUNTUNIQUE / ARRAYFORMULA 함수는
-Google Sheets 전용이며 Excel에서는 작동하지 않는다. 이 스크립트는
-xlsx 파일에 "문자열로서" 해당 수식을 기록하며, Google Drive에 업로드 후
-Google Sheets로 열어야 정상 작동한다.
+v1과의 차이:
+- monthly_summary/missing_check의 LET/HSTACK/MAP 같은 고급 배열 수식을 모두 제거하고,
+  Apps Script(apps_script/Code.gs)가 값으로 직접 계산해서 채우는 방식으로 바꿈.
+  → 환경별 수식 호환성 문제가 없고, Form 제출 시 자동으로 갱신됨(트리거 기반).
+- sales_logs의 중복여부(I열)도 MAP/LAMBDA 대신 Apps Script가 값으로 채움.
+- "dashboard" 탭을 추가해서 오늘 현황을 한눈에 볼 수 있게 함(총매장/제출/미제출/매출/컨설턴트별).
+- 모든 계산 결과는 "값"이며, 조건부 서식 규칙(휴무/미입력/중복확인 등 텍스트 매칭)은 동일하게 유지.
+
+이 스크립트가 만드는 xlsx는 구조와 헤더, 예시 데이터, 조건부 서식만 담고 있고
+실제 계산은 Google Sheets에 연결된 Apps Script가 수행한다.
 """
+import datetime as dt
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.formatting.rule import FormulaRule, CellIsRule
 from openpyxl.utils import get_column_letter
@@ -33,15 +39,16 @@ STORES = [
     ("S017", "박석현", "소랑", "", "", "경기", "active", ""),
     ("S018", "송다영", "한계령코다리찜동태찌개", "", "", "강원", "active", ""),
 ]
-
 NUM_STORES = len(STORES)
-SUMMARY_DATA_START_ROW = 4
-SUMMARY_DATA_END_ROW = SUMMARY_DATA_START_ROW + NUM_STORES - 1  # 21
+SUMMARY_START = 4
+SUMMARY_END = SUMMARY_START + NUM_STORES - 1
 
 HEADER_FILL = PatternFill("solid", fgColor="2F5496")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 SETTING_FILL = PatternFill("solid", fgColor="FFF2CC")
-HIDDEN_COL_FILL = PatternFill("solid", fgColor="EEEEEE")
+KPI_FILL = PatternFill("solid", fgColor="E8F0FE")
+THIN = Side(style="thin", color="CCCCCC")
+BOX = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
 wb = openpyxl.Workbook()
 wb.remove(wb.active)
@@ -56,6 +63,45 @@ def style_header_row(ws, row, max_col):
 
 
 # ---------------------------------------------------------------------------
+# 0. dashboard — 한눈에 보는 오늘 현황 (전부 Apps Script refreshDashboard()가 채움)
+# ---------------------------------------------------------------------------
+ws = wb.create_sheet("dashboard")
+ws["A1"] = "일매출 대시보드"
+ws["A1"].font = Font(bold=True, size=16)
+
+ws["A3"] = "기준일"
+ws["B3"] = dt.date(2026, 6, 1)
+ws["B3"].number_format = "yyyy-mm-dd"
+ws["B3"].fill = SETTING_FILL
+ws["A3"].font = Font(bold=True)
+ws["C3"] = "(refreshDashboard 실행 시 missing_check!B1과 같은 날짜로 자동 동기화됨)"
+ws["C3"].font = Font(italic=True, size=9, color="888888")
+
+kpi_labels = ["활성 매장 수", "오늘 제출", "오늘 미제출", "오늘 매출합", "이번달 매출합(누적)", "오늘 입력률"]
+for i, label in enumerate(kpi_labels):
+    col = 1 + i
+    ws.cell(row=5, column=col, value=label).font = Font(bold=True)
+    ws.cell(row=5, column=col).fill = HEADER_FILL
+    ws.cell(row=5, column=col).font = Font(bold=True, color="FFFFFF")
+    ws.cell(row=5, column=col).alignment = Alignment(horizontal="center")
+    v = ws.cell(row=6, column=col)
+    v.fill = KPI_FILL
+    v.border = BOX
+    v.alignment = Alignment(horizontal="center")
+    v.font = Font(size=14, bold=True)
+
+ws.cell(row=8, column=1, value="컨설턴트별 현황").font = Font(bold=True, size=12)
+headers = ["담당컨설턴트", "담당 매장수", "오늘 제출", "오늘 미제출", "이번달 매출합"]
+for i, h in enumerate(headers, start=1):
+    ws.cell(row=9, column=i, value=h)
+style_header_row(ws, 9, len(headers))
+
+widths = [16, 14, 12, 12, 18, 40]
+for i, w in enumerate(widths, start=1):
+    ws.column_dimensions[get_column_letter(i)].width = w
+ws.freeze_panes = "A10"
+
+# ---------------------------------------------------------------------------
 # 1. stores
 # ---------------------------------------------------------------------------
 ws = wb.create_sheet("stores")
@@ -67,15 +113,12 @@ for row in STORES:
 
 dv_status = DataValidation(type="list", formula1='"active,inactive"', allow_blank=False)
 ws.add_data_validation(dv_status)
-dv_status.add(f"G2:G200")
+dv_status.add("G2:G200")
 
-# H열(입력링크) 예시: 실제 Form 생성 전이므로 "형식 예시"임을 표시.
-# apps_script/Code.gs의 createSalesForm() 실행 시 실제 prefilled URL로 자동 교체됨.
 for i, row in enumerate(STORES, start=2):
-    store_id = row[0]
     ws.cell(row=i, column=8, value=(
-        f"(예시-형식만) https://docs.google.com/forms/d/e/FORM_ID/viewform"
-        f"?usp=pp_url&entry.123456789={store_id}"
+        f"(예시-형식만, createSalesForm() 실행 후 자동 교체) "
+        f"https://docs.google.com/forms/d/e/FORM_ID/viewform?usp=pp_url&entry.123456789={row[0]}"
     ))
 
 widths = [10, 14, 30, 12, 14, 8, 10, 55]
@@ -85,6 +128,8 @@ ws.freeze_panes = "A2"
 
 # ---------------------------------------------------------------------------
 # 2. sales_logs
+#   G(log_id)/H(업체명)는 그대로 둬도 안전한 단순 수식이라 유지.
+#   I(중복여부)는 Apps Script가 값으로 기록(수식 제거) → 환경 호환성 문제 차단.
 # ---------------------------------------------------------------------------
 ws = wb.create_sheet("sales_logs")
 headers = ["제출시간", "store_id", "영업일", "영업여부", "일매출", "메모",
@@ -92,31 +137,17 @@ headers = ["제출시간", "store_id", "영업일", "영업여부", "일매출",
 ws.append(headers)
 style_header_row(ws, 1, len(headers))
 
-import datetime as _dt
-
-# 이관 문서 11장 테스트 시나리오 + 예시 데이터(S003 추가) — A~F열만 채움.
-# G/H/I열은 수식 영역이므로 직접 값을 넣지 않는다(아래 ARRAYFORMULA/MAP이 전체 범위를 채움).
 TEST_ROWS = [
-    (_dt.datetime(2026, 6, 1, 22, 0), "S001", _dt.date(2026, 6, 1), "영업", 900000, "테스트1: 정상 입력"),
-    (_dt.datetime(2026, 6, 2, 22, 0), "S001", _dt.date(2026, 6, 2), "휴무", 0, "테스트2: 휴무"),
-    (_dt.datetime(2026, 6, 3, 22, 0), "S001", _dt.date(2026, 6, 1), "영업", 950000, "테스트3: 중복 입력(6/1 재입력)"),
-    (_dt.datetime(2026, 6, 1, 21, 30), "S003", _dt.date(2026, 6, 1), "영업", 650000, "예시: 다른 매장 정상 입력"),
+    (dt.datetime(2026, 6, 1, 22, 0), "S001", dt.date(2026, 6, 1), "영업", 900000, "테스트1: 정상 입력", "L0001", "굴지막 영천본점", False, False, ""),
+    (dt.datetime(2026, 6, 2, 22, 0), "S001", dt.date(2026, 6, 2), "휴무", 0, "테스트2: 휴무", "L0002", "굴지막 영천본점", False, False, ""),
+    (dt.datetime(2026, 6, 3, 22, 0), "S001", dt.date(2026, 6, 1), "영업", 950000, "테스트3: 중복 입력(6/1 재입력)", "L0003", "굴지막 영천본점", True, False, ""),
+    (dt.datetime(2026, 6, 1, 21, 30), "S003", dt.date(2026, 6, 1), "영업", 650000, "예시: 다른 매장 정상 입력", "L0004", "원시민족갈비 부평구청점", False, False, ""),
 ]
 for r_idx, row in enumerate(TEST_ROWS, start=2):
     for c_idx, val in enumerate(row, start=1):
         ws.cell(row=r_idx, column=c_idx, value=val)
-ws["C2"].number_format = ws["C3"].number_format = ws["C4"].number_format = ws["C5"].number_format = "yyyy-mm-dd"
-ws["A2"].number_format = ws["A3"].number_format = ws["A4"].number_format = ws["A5"].number_format = "yyyy-mm-dd hh:mm"
-
-ws["G2"] = '=ARRAYFORMULA(IF(A2:A="","","L"&TEXT(ROW(A2:A)-1,"0000")))'
-ws["H2"] = '=ARRAYFORMULA(IF(B2:B="","",IFERROR(VLOOKUP(B2:B,stores!$A:$C,3,0),"store_id 오류")))'
-ws["I2"] = ('=MAP(B2:B1000,C2:C1000,ROW(B2:B1000),'
-            'LAMBDA(store,date,rownum,'
-            'IF(OR(store="",date=""),FALSE,'
-            'COUNTIFS($B$2:INDEX($B:$B,rownum),store,'
-            '$C$2:INDEX($C:$C,rownum),date)>1)))')
-for r_idx in range(2, 2 + len(TEST_ROWS)):
-    ws.cell(row=r_idx, column=10, value=False)
+    ws.cell(row=r_idx, column=1).number_format = "yyyy-mm-dd hh:mm"
+    ws.cell(row=r_idx, column=3).number_format = "yyyy-mm-dd"
 
 dv_status2 = DataValidation(type="list", formula1='"영업,휴무"', allow_blank=False)
 ws.add_data_validation(dv_status2)
@@ -126,12 +157,10 @@ dv_bool = DataValidation(type="list", formula1='"TRUE,FALSE"', allow_blank=False
 ws.add_data_validation(dv_bool)
 dv_bool.add("J2:J1000")
 
-# 영업인데 0원 경고
 ws.conditional_formatting.add(
     "A2:K1000",
     FormulaRule(formula=['AND($D2="영업",$E2=0)'], font=Font(color="CC0000")),
 )
-# 중복 행 강조
 ws.conditional_formatting.add(
     "I2:I1000",
     CellIsRule(operator="equal", formula=["TRUE"], fill=PatternFill("solid", fgColor="FFCCCC")),
@@ -143,10 +172,9 @@ for i, w in enumerate(widths, start=1):
 ws.freeze_panes = "A2"
 
 # ---------------------------------------------------------------------------
-# 3. monthly_summary
+# 3. monthly_summary — 헤더/포맷만 유지, 모든 값은 rebuildMonthlySummary()가 채움
 # ---------------------------------------------------------------------------
 ws = wb.create_sheet("monthly_summary")
-
 ws["B1"] = "기준연도"
 ws["C1"] = 2026
 ws["D1"] = "기준월"
@@ -155,6 +183,8 @@ ws["B1"].font = Font(bold=True)
 ws["D1"].font = Font(bold=True)
 ws["C1"].fill = SETTING_FILL
 ws["E1"].fill = SETTING_FILL
+ws["G1"] = "(C1/E1 변경 후 메뉴 > monthly_summary 새로고침 실행)"
+ws["G1"].font = Font(italic=True, size=9, color="888888")
 
 headers = ["store_id", "담당컨설턴트", "업체명", "입력률", "미입력일수", "휴무일수",
            "영업일수", "월매출", "일평균", "전월대비"]
@@ -162,122 +192,31 @@ for i, h in enumerate(headers, start=1):
     ws.cell(row=3, column=i, value=h)
 style_header_row(ws, 3, len(headers))
 
-# K~AO = 1~31일
 for day in range(1, 32):
-    col = 11 + day - 1  # K=11
+    col = 11 + day - 1
     cell = ws.cell(row=3, column=col, value=day)
     cell.fill = HEADER_FILL
     cell.font = HEADER_FONT
     cell.alignment = Alignment(horizontal="center")
 
-for r in range(SUMMARY_DATA_START_ROW, SUMMARY_DATA_END_ROW + 1):
-    n = r - SUMMARY_DATA_START_ROW + 1  # 1-based index among active stores
-    ws.cell(row=r, column=1, value=(
-        f'=IFERROR(INDEX(FILTER(stores!$A$2:$A,stores!$G$2:$G="active"),ROW()-3),"")'
-    ))
-    ws.cell(row=r, column=2, value=f'=IF($A{r}="","",VLOOKUP($A{r},stores!$A:$B,2,0))')
-    ws.cell(row=r, column=3, value=f'=IF($A{r}="","",VLOOKUP($A{r},stores!$A:$C,3,0))')
+# 예시 미리보기 값(스크립트 실행 전 참고용) — S001 1행만 채워서 형태를 보여줌
+ws.cell(row=4, column=1, value="S001")
+ws.cell(row=4, column=2, value="김한성")
+ws.cell(row=4, column=3, value="굴지막 영천본점")
+ws.cell(row=4, column=4, value="(자동계산)")
+ws.cell(row=4, column=5, value="(자동계산)")
+ws.cell(row=4, column=6, value=1)
+ws.cell(row=4, column=7, value=1)
+ws.cell(row=4, column=8, value=900000)
+ws.cell(row=4, column=9, value=900000)
+ws.cell(row=4, column=10, value="데이터부족")
+ws.cell(row=4, column=11, value="중복확인")
+ws.cell(row=4, column=12, value="휴무")
+for day in range(3, 31):
+    ws.cell(row=4, column=10 + day, value="미입력")
+ws.cell(row=4, column=10 + 31, value="---")
 
-    ws.cell(row=r, column=4, value=(
-        f'=IF($A{r}="","",'
-        f'IF(DATE($C$1,$E$1,1)>TODAY(),0,'
-        f'IFERROR('
-        f'COUNTUNIQUE(FILTER(sales_logs!$C$2:$C$1000,'
-        f'sales_logs!$B$2:$B$1000=$A{r},'
-        f'sales_logs!$C$2:$C$1000>=DATE($C$1,$E$1,1),'
-        f'sales_logs!$C$2:$C$1000<=MIN(TODAY(),EOMONTH(DATE($C$1,$E$1,1),0)),'
-        f'sales_logs!$I$2:$I$1000=FALSE))'
-        f'/DAY(MIN(TODAY(),EOMONTH(DATE($C$1,$E$1,1),0))),0)))'
-    ))
-
-    ws.cell(row=r, column=5, value=(
-        f'=IF($A{r}="","",'
-        f'IF(DATE($C$1,$E$1,1)>TODAY(),0,'
-        f'DAY(MIN(TODAY(),EOMONTH(DATE($C$1,$E$1,1),0)))'
-        f'-IFERROR(COUNTUNIQUE(FILTER(sales_logs!$C$2:$C$1000,'
-        f'sales_logs!$B$2:$B$1000=$A{r},'
-        f'sales_logs!$C$2:$C$1000>=DATE($C$1,$E$1,1),'
-        f'sales_logs!$C$2:$C$1000<=MIN(TODAY(),EOMONTH(DATE($C$1,$E$1,1),0)),'
-        f'sales_logs!$I$2:$I$1000=FALSE)),0)))'
-    ))
-
-    ws.cell(row=r, column=6, value=(
-        f'=IF($A{r}="","",COUNTIFS('
-        f'sales_logs!$B:$B,$A{r},'
-        f'sales_logs!$C:$C,">="&DATE($C$1,$E$1,1),'
-        f'sales_logs!$C:$C,"<="&EOMONTH(DATE($C$1,$E$1,1),0),'
-        f'sales_logs!$D:$D,"휴무",'
-        f'sales_logs!$I:$I,FALSE))'
-    ))
-
-    ws.cell(row=r, column=7, value=(
-        f'=IF($A{r}="","",COUNTIFS('
-        f'sales_logs!$B:$B,$A{r},'
-        f'sales_logs!$C:$C,">="&DATE($C$1,$E$1,1),'
-        f'sales_logs!$C:$C,"<="&EOMONTH(DATE($C$1,$E$1,1),0),'
-        f'sales_logs!$D:$D,"영업",'
-        f'sales_logs!$I:$I,FALSE))'
-    ))
-
-    ws.cell(row=r, column=8, value=(
-        f'=IF($A{r}="","",SUMIFS('
-        f'sales_logs!$E:$E,'
-        f'sales_logs!$B:$B,$A{r},'
-        f'sales_logs!$C:$C,">="&DATE($C$1,$E$1,1),'
-        f'sales_logs!$C:$C,"<="&EOMONTH(DATE($C$1,$E$1,1),0),'
-        f'sales_logs!$D:$D,"영업",'
-        f'sales_logs!$I:$I,FALSE))'
-    ))
-
-    ws.cell(row=r, column=9, value=f'=IF(OR($A{r}="",G{r}=0),"",H{r}/G{r})')
-
-    ws.cell(row=r, column=10, value=(
-        f'=IF($A{r}="","",'
-        f'LET('
-        f'cur_end, MIN(TODAY(),EOMONTH(DATE($C$1,$E$1,1),0)),'
-        f'cmp_day, DAY(cur_end),'
-        f'prev_start, DATE($C$1,$E$1-1,1),'
-        f'prev_end, MIN(DATE($C$1,$E$1-1,cmp_day),EOMONTH(DATE($C$1,$E$1-1,1),0)),'
-        f'cur_sales, SUMIFS(sales_logs!$E:$E,'
-        f'sales_logs!$B:$B,$A{r},'
-        f'sales_logs!$C:$C,">="&DATE($C$1,$E$1,1),'
-        f'sales_logs!$C:$C,"<="&cur_end,'
-        f'sales_logs!$D:$D,"영업",'
-        f'sales_logs!$I:$I,FALSE),'
-        f'prev_sales, SUMIFS(sales_logs!$E:$E,'
-        f'sales_logs!$B:$B,$A{r},'
-        f'sales_logs!$C:$C,">="&prev_start,'
-        f'sales_logs!$C:$C,"<="&prev_end,'
-        f'sales_logs!$D:$D,"영업",'
-        f'sales_logs!$I:$I,FALSE),'
-        f'IF(prev_sales=0,"데이터부족",(cur_sales-prev_sales)/prev_sales)))'
-    ))
-
-    for day in range(1, 32):
-        col = 11 + day - 1
-        col_letter = get_column_letter(col)
-        ws.cell(row=r, column=col, value=(
-            f'=IF($A{r}="","",'
-            f'IF(MONTH(DATE($C$1,$E$1,{col_letter}$3))<>$E$1,"---",'
-            f'IF(DATE($C$1,$E$1,{col_letter}$3)>TODAY(),"",'
-            f'IF(COUNTIFS(sales_logs!$B:$B,$A{r},'
-            f'sales_logs!$C:$C,DATE($C$1,$E$1,{col_letter}$3),'
-            f'sales_logs!$I:$I,TRUE)>0,"중복확인",'
-            f'IF(COUNTIFS(sales_logs!$B:$B,$A{r},'
-            f'sales_logs!$C:$C,DATE($C$1,$E$1,{col_letter}$3),'
-            f'sales_logs!$D:$D,"휴무",'
-            f'sales_logs!$I:$I,FALSE)>0,"휴무",'
-            f'IF(COUNTIFS(sales_logs!$B:$B,$A{r},'
-            f'sales_logs!$C:$C,DATE($C$1,$E$1,{col_letter}$3),'
-            f'sales_logs!$I:$I,FALSE)=0,"미입력",'
-            f'SUMIFS(sales_logs!$E:$E,'
-            f'sales_logs!$B:$B,$A{r},'
-            f'sales_logs!$C:$C,DATE($C$1,$E$1,{col_letter}$3),'
-            f'sales_logs!$D:$D,"영업",'
-            f'sales_logs!$I:$I,FALSE)))))))'
-        ))
-
-day_range = f"K4:AO{SUMMARY_DATA_END_ROW}"
+day_range = f"K4:AO{SUMMARY_END}"
 ws.conditional_formatting.add(day_range, CellIsRule(operator="equal", formula=['"휴무"'],
                                fill=PatternFill("solid", fgColor="CCCCCC")))
 ws.conditional_formatting.add(day_range, CellIsRule(operator="equal", formula=['"미입력"'],
@@ -287,10 +226,9 @@ ws.conditional_formatting.add(day_range, CellIsRule(operator="equal", formula=['
 ws.conditional_formatting.add(day_range, CellIsRule(operator="equal", formula=['"---"'],
                                fill=PatternFill("solid", fgColor="AAAAAA")))
 
-j_range = f"J4:J{SUMMARY_DATA_END_ROW}"
+j_range = f"J4:J{SUMMARY_END}"
 ws.conditional_formatting.add(j_range, CellIsRule(operator="greaterThan", formula=["0"], font=Font(color="CC0000")))
 ws.conditional_formatting.add(j_range, CellIsRule(operator="lessThan", formula=["0"], font=Font(color="0000CC")))
-
 ws.conditional_formatting.add("K3:AO3", FormulaRule(formula=["K$3=DAY(TODAY())"],
                               fill=PatternFill("solid", fgColor="E3F2FD")))
 
@@ -303,48 +241,30 @@ for day in range(1, 32):
 ws.freeze_panes = "K4"
 
 # ---------------------------------------------------------------------------
-# 4. missing_check
+# 4. missing_check — 헤더만 유지, A5 이하 값은 refreshMissingCheck()가 채움
 # ---------------------------------------------------------------------------
 ws = wb.create_sheet("missing_check")
-
 ws["A1"] = "확인일"
-# 예시 데이터 기준일로 고정(2026-06-01). 실제 운영 시 =TODAY() 로 바꿔서 매일 자동 갱신.
-ws["B1"] = _dt.date(2026, 6, 1)
+ws["B1"] = dt.date(2026, 6, 1)
 ws["A1"].font = Font(bold=True)
 ws["B1"].fill = SETTING_FILL
 ws["B1"].number_format = "yyyy-mm-dd"
 
 ws["A2"] = "오늘 제출 수"
-ws["B2"] = "=COUNTIF(sales_logs!$C$2:$C$1000,$B$1)"
+ws["B2"] = 2
 ws["C2"] = "미제출 수"
-ws["D2"] = '=COUNTIF(stores!$G$2:$G$200,"active")-COUNTIF(sales_logs!$C$2:$C$1000,$B$1)'
+ws["D2"] = 16
 ws["E2"] = "오늘 매출합"
-ws["F2"] = '=SUMIFS(sales_logs!$E$2:$E$1000,sales_logs!$C$2:$C$1000,$B$1,sales_logs!$D$2:$D$1000,"영업")'
+ws["F2"] = 1550000
 for c in ["A2", "C2", "E2"]:
     ws[c].font = Font(bold=True)
+ws["G2"] = "(값은 refreshMissingCheck() 실행 시 자동 갱신됨)"
+ws["G2"].font = Font(italic=True, size=9, color="888888")
 
 headers = ["담당컨설턴트", "업체명", "연락처", "미입력일", "입력링크", "상태"]
 for i, h in enumerate(headers, start=1):
     ws.cell(row=4, column=i, value=h)
 style_header_row(ws, 4, len(headers))
-
-ws["A5"] = (
-    '=IFERROR('
-    'LET('
-    'cond,(stores!$G$2:$G$200="active")*'
-    '(COUNTIFS(sales_logs!$B$2:$B$1000,stores!$A$2:$A$200,'
-    'sales_logs!$C$2:$C$1000,$B$1)=0),'
-    'HSTACK('
-    'FILTER(stores!$B$2:$B$200,cond),'
-    'FILTER(stores!$C$2:$C$200,cond),'
-    'FILTER(stores!$E$2:$E$200,cond),'
-    'FILTER(IF(stores!$A$2:$A$200<>"",$B$1,""),cond),'
-    'FILTER(stores!$H$2:$H$200,cond),'
-    'FILTER(stores!$G$2:$G$200,cond)'
-    ')'
-    '),'
-    '"오늘 미제출 매장 없음")'
-)
 
 widths = [14, 30, 14, 12, 40, 10]
 for i, w in enumerate(widths, start=1):
@@ -352,43 +272,35 @@ for i, w in enumerate(widths, start=1):
 ws.freeze_panes = "A5"
 
 # ---------------------------------------------------------------------------
-# 5. 사용예시_가이드 — Excel/openpyxl은 Google Sheets 전용 함수(MAP/LET/HSTACK 등)를
-#    계산하지 못하므로, sales_logs에 넣어둔 예시 데이터가 실제 Google Sheets에서
-#    열렸을 때 monthly_summary/missing_check에 어떤 값으로 나와야 하는지를
-#    미리 손으로 계산해서 정리해둔 가이드 탭. (실제 계산은 Google Sheets에서 일어남)
+# 5. 사용예시_가이드
 # ---------------------------------------------------------------------------
 ws = wb.create_sheet("사용예시_가이드", 0)
-ws.column_dimensions["A"].width = 95
+ws.column_dimensions["A"].width = 100
 guide_lines = [
-    "■ 이 파일에는 이미 예시(테스트) 데이터가 들어가 있습니다.",
-    "  sales_logs 탭 2~5행: S001 6/1 영업 90만원, S001 6/2 휴무, S001 6/1 영업 95만원(중복),"
-    " S003 6/1 영업 65만원",
+    "■ v2 변경점: 모든 집계(monthly_summary/missing_check)와 중복체크(sales_logs I열)는",
+    "  더 이상 LET/HSTACK/MAP 같은 고급 수식이 아니라 Apps Script가 계산해서 값으로 채웁니다.",
+    "  → 수식 호환성 문제가 없고, Form 제출 시 트리거가 자동으로 전부 다시 계산합니다.",
     "",
-    "■ Google Sheets로 열면 자동으로 계산되어야 하는 값 (monthly_summary, C1=2026/E1=6 기준)",
-    "  S001 행: 월매출 900,000 / 영업일수 1 / 휴무일수 1 / 일평균 900,000",
-    "           K열(1일)=\"중복확인\"(빨간 배경) / L열(2일)=\"휴무\"(회색 배경)",
-    "           나머지 입력 안 한 날짜 = \"미입력\"(노란 배경), 6월에 없는 날(31일) = \"---\"",
-    "  S003 행: 월매출 650,000 / 영업일수 1 / K열(1일)=650000",
-    "  S002, S004~S018 행: 입력 데이터 없음 → 모든 날짜 \"미입력\", 월매출 0",
+    "■ 이 xlsx 파일 자체는 '구조 + 예시 데이터 + 조건부 서식'만 담고 있습니다.",
+    "  실제 계산은 Google Sheets로 연 다음 Apps Script(apps_script/Code.gs)를 붙여넣고",
+    "  메뉴 [일매출관리 > 0. 전체 자동 설정]을 한 번 실행해야 시작됩니다.",
     "",
-    "■ Google Sheets로 열면 자동으로 계산되어야 하는 값 (missing_check, B1=2026-06-01 기준)",
-    "  오늘 제출 수(B2) = 2  (S001, S003가 6/1에 제출함)",
-    "  미제출 수(D2) = 16  (active 매장 18개 - 2개)",
-    "  A5 이하 목록: S002, S004~S018 (S001, S003 제외) 16개 매장이 자동으로 나열되어야 함",
+    "■ sales_logs에 예시 데이터 4줄이 들어가 있습니다 (S001 정상/휴무/중복, S003 정상).",
+    "  monthly_summary 4행(S001)에는 '이렇게 보여야 한다'는 미리보기 값을 손으로 채워뒀습니다.",
+    "  실제로는 메뉴 [1. monthly_summary 새로고침]을 누르면 18개 매장 전체가 이 형태로 계산됩니다.",
     "",
-    "■ sales_logs 탭에서 직접 확인할 것",
-    "  3행(S001 6/1 95만원, 중복테스트): I열(중복여부) = TRUE, 배경 빨간색",
-    "  1행/2행(S001): I열 = FALSE",
-    "  4행(S003): I열 = FALSE",
+    "■ 자동화 흐름",
+    "  Form 제출 → onFormSubmit 트리거 → 중복여부/확인여부 기록",
+    "             → monthly_summary, missing_check, dashboard 자동 재계산",
+    "  매일 23:50 → dailyAutoRefresh 시간 트리거 → 미제출 매장 자동 갱신 + 관리자 이메일 발송(선택)",
     "",
-    "■ 만약 위 값과 다르게 나온다면",
-    "  1) C1/E1(기준연도/월)이 2026/6으로 되어 있는지, B1(missing_check)이 2026-06-01인지 확인",
-    "  2) sales_logs C열(영업일)이 '날짜' 형식인지(텍스트로 들어가면 SUMIFS/COUNTIFS가 안 됨)",
-    "  3) stores G열 상태가 정확히 소문자 'active'인지 확인",
-    "  4) missing_check A5가 #ERROR!면 apps_script/Code.gs의 refreshMissingCheck()로 대체",
-    "",
-    "■ 실제 매출 데이터가 들어오면",
-    "  이 4줄의 예시 데이터(sales_logs 2~5행)는 지우고 실제 Form 응답으로 채워야 합니다.",
+    "■ 처음 설정 순서",
+    "  1) Google Drive 업로드 → Google Sheets로 열기",
+    "  2) 확장 프로그램 > Apps Script 편집기 → Code.gs 내용 전체 붙여넣기 → 저장",
+    "  3) 시트로 돌아와 새로고침 → 메뉴 [일매출관리] 표시 확인",
+    "  4) [일매출관리 > 0. 전체 자동 설정] 실행 (Form 생성 + 트리거 설치 한 번에 처리)",
+    "     - 실행 전 sales_logs 예시 데이터(2~5행)는 지우거나 백업할 것",
+    "  5) stores!H열에 생성된 실제 pre-filled 링크를 매장별로 점주에게 공유",
 ]
 for i, line in enumerate(guide_lines, start=1):
     ws.cell(row=i, column=1, value=line)

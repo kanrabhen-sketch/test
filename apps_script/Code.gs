@@ -1,24 +1,49 @@
 /**
- * 일매출 관리 시스템 - Apps Script 모음
- * 스프레드시트 확장 메뉴(Apps Script 편집기)에 이 파일 내용을 붙여넣고 사용한다.
- * Extensions > Apps Script 에서 새 스크립트 파일로 추가.
+ * 일매출 관리 시스템 v2 - Apps Script
+ *
+ * v1과 다른 점: monthly_summary/missing_check의 집계와 sales_logs의 중복체크를
+ * 더 이상 LET/HSTACK/MAP 같은 고급 시트 수식에 맡기지 않고, 전부 이 스크립트가
+ * 계산해서 "값"으로 써넣는다. Form 제출 → 트리거 → 전체 재계산까지 자동으로 이어진다.
+ *
+ * 설치: 확장 프로그램 > Apps Script 편집기 → 이 파일 내용을 통째로 붙여넣고 저장.
+ * 시작: 시트 새로고침 → 메뉴 [일매출관리 > 0. 전체 자동 설정] 실행.
  */
 
 const SHEET_STORES = 'stores';
 const SHEET_SALES_LOGS = 'sales_logs';
-const PROP_STORE_ID_ITEM_ID = 'STORE_ID_ITEM_ID'; // createSalesForm() 실행 후 자동 저장됨
+const SHEET_MONTHLY = 'monthly_summary';
+const SHEET_MISSING = 'missing_check';
+const SHEET_DASHBOARD = 'dashboard';
+const PROP_STORE_ID_ITEM_ID = 'STORE_ID_ITEM_ID';
+const PROP_FORM_EDIT_URL = 'FORM_EDIT_URL';
+const ADMIN_EMAIL = ''; // 비워두면 이메일 발송 안 함. 채우면 매일 미제출 매장 요약 발송.
 
-/**
- * 실제 Google Form을 코드로 생성하고, 응답 대상을 이 스프레드시트로 연결한 뒤,
- * 응답 탭 이름을 sales_logs로 맞추고 G/H/I 수식까지 다시 채워준다.
- * AI는 구글 로그인을 할 수 없으므로, 이 스크립트를 동진님 계정에서 한 번 실행하면
- * 동진님 계정 권한으로 실제 Form이 만들어진다 (로그인 위임이 필요 없는 방식).
- *
- * 실행 전 주의: sales_logs 탭에 테스트 데이터가 있으면 백업 후 비우고 실행할 것.
- * (응답 탭이 새로 생성되면서 기존 sales_logs를 대체하기 때문)
- *
- * 메뉴: 일매출관리 > 0. Google Form 실제로 생성하기
- */
+// ===========================================================================
+// 0. 전체 자동 설정 (Form 생성 + 트리거 설치) — 처음 한 번만 실행
+// ===========================================================================
+function setupAll() {
+  if (!PropertiesService.getScriptProperties().getProperty(PROP_FORM_EDIT_URL)) {
+    createSalesForm();
+  }
+  installTriggers();
+  refreshAll();
+  SpreadsheetApp.getUi().alert('전체 자동 설정 완료. Form/트리거/초기 집계가 모두 준비되었습니다.');
+}
+
+function installTriggers() {
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (['onFormSubmitHandler', 'dailyAutoRefresh'].includes(t.getHandlerFunction())) {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ScriptApp.newTrigger('onFormSubmitHandler').forSpreadsheet(ss).onFormSubmit().create();
+  ScriptApp.newTrigger('dailyAutoRefresh').timeBased().atHour(23).nearMinute(50).everyDays(1).create();
+}
+
+// ===========================================================================
+// 1. Google Form 실제 생성
+// ===========================================================================
 function createSalesForm() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const oldLogs = ss.getSheetByName(SHEET_SALES_LOGS);
@@ -41,15 +66,12 @@ function createSalesForm() {
   const memoSharedPage = form.addPageBreakItem().setTitle('특이사항');
   form.addParagraphTextItem().setTitle('특이사항').setRequired(false);
 
-  // "영업 여부" 항목은 분기 대상 페이지보다 먼저 추가된 페이지들을 참조해야 하므로
-  // 마지막에 추가하고, 두 선택지 모두 동일한 "특이사항" 페이지로 합류시킨다.
   const statusItem = form.addMultipleChoiceItem();
   statusItem.setTitle('영업 여부').setRequired(true);
   statusItem.setChoices([
     statusItem.createChoice('영업', salesPage),
     statusItem.createChoice('휴무', memoSharedPage),
   ]);
-  // 항목 순서를 매장코드 → 영업일 → 영업여부 → (분기) 순으로 맞추기 위해 재배치
   form.moveItem(statusItem.getIndex(), 2);
 
   if (oldLogs) ss.deleteSheet(oldLogs);
@@ -61,40 +83,24 @@ function createSalesForm() {
   newLogs.setName(SHEET_SALES_LOGS);
 
   newLogs.getRange('G1:K1').setValues([['log_id', '업체명', '중복여부', '확인여부', '수정메모']]);
-  newLogs.getRange('G2').setFormula('=ARRAYFORMULA(IF(A2:A="","","L"&TEXT(ROW(A2:A)-1,"0000")))');
-  newLogs.getRange('H2').setFormula('=ARRAYFORMULA(IF(B2:B="","",IFERROR(VLOOKUP(B2:B,stores!$A:$C,3,0),"store_id 오류")))');
-  newLogs.getRange('I2').setFormula(
-    '=MAP(B2:B1000,C2:C1000,ROW(B2:B1000),LAMBDA(store,date,rownum,' +
-    'IF(OR(store="",date=""),FALSE,COUNTIFS($B$2:INDEX($B:$B,rownum),store,' +
-    '$C$2:INDEX($C:$C,rownum),date)>1)))'
-  );
-  newLogs.getRange('J2').setValue(false);
 
   PropertiesService.getScriptProperties().setProperty(PROP_STORE_ID_ITEM_ID, String(storeIdItem.getId()));
-  PropertiesService.getScriptProperties().setProperty('FORM_PUBLISHED_URL', form.getPublishedUrl());
-  PropertiesService.getScriptProperties().setProperty('FORM_EDIT_URL', form.getEditUrl());
+  PropertiesService.getScriptProperties().setProperty(PROP_FORM_EDIT_URL, form.getEditUrl());
 
   generateStoreLinks();
+  recomputeSalesLogs_();
 
   SpreadsheetApp.getUi().alert(
     'Form 생성 완료\n응답 URL: ' + form.getPublishedUrl() +
-    '\n편집 URL: ' + form.getEditUrl() +
     '\nstores!H열에 매장별 pre-filled 링크가 자동으로 채워졌습니다.'
   );
 }
 
-/**
- * createSalesForm()이 만든 실제 Form을 기준으로 매장별 pre-filled 링크를
- * stores 탭 H열에 채운다. Form.createResponse()로 실제 prefilled URL을 만들기 때문에
- * 가짜 URL이 아니라 클릭하면 바로 해당 매장코드가 채워진 채 입력 화면이 열린다.
- * 메뉴: 일매출관리 > 1. 매장별 입력링크 생성
- */
 function generateStoreLinks() {
   const itemId = PropertiesService.getScriptProperties().getProperty(PROP_STORE_ID_ITEM_ID);
-  if (!itemId) {
-    throw new Error('먼저 "0. Google Form 실제로 생성하기"를 실행하세요.');
-  }
-  const editUrl = PropertiesService.getScriptProperties().getProperty('FORM_EDIT_URL');
+  const editUrl = PropertiesService.getScriptProperties().getProperty(PROP_FORM_EDIT_URL);
+  if (!itemId || !editUrl) throw new Error('먼저 "0. 전체 자동 설정"을 실행하세요.');
+
   const form = FormApp.openByUrl(editUrl);
   const storeIdItem = form.getItemById(Number(itemId)).asTextItem();
 
@@ -113,72 +119,187 @@ function generateStoreLinks() {
   sheet.getRange(2, 8, links.length, 1).setValues(links);
 }
 
-/**
- * Google Form 응답이 sales_logs A~F열에 들어올 때마다 J열(확인여부)을
- * 기본값 FALSE로 채운다. 폼 제출 트리거(onFormSubmit)에 연결해서 사용.
- * 트리거 설정: 편집 > 현재 프로젝트의 트리거 > 추가 > onFormSubmit / 양식 제출 시
- */
-function onFormSubmit(e) {
+// ===========================================================================
+// 2. sales_logs 파생 컬럼(log_id/업체명/중복여부/확인여부) 전체 재계산
+// ===========================================================================
+function recomputeSalesLogs_() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_SALES_LOGS);
+  const storesSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_STORES);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+
+  const n = lastRow - 1;
+  const data = sheet.getRange(2, 1, n, 6).getValues(); // A~F
+  const storeMap = {};
+  storesSheet.getRange(2, 1, Math.max(storesSheet.getLastRow() - 1, 0), 3).getValues()
+    .forEach(([id, , name]) => { if (id) storeMap[id] = name; });
+
+  const seen = {}; // key: storeId|dateStr -> count
+  const logIds = [], names = [], dups = [], checks = [];
+
+  data.forEach((row, i) => {
+    const [, storeId, saleDate] = row;
+    if (!storeId) {
+      logIds.push(['']); names.push(['']); dups.push(['']);
+      checks.push([sheet.getRange(i + 2, 10).getValue() || false]);
+      return;
+    }
+    logIds.push(['L' + String(i + 1).padStart(4, '0')]);
+    names.push([storeMap[storeId] || 'store_id 오류']);
+
+    const dateStr = saleDate ? Utilities.formatDate(new Date(saleDate), Session.getScriptTimeZone(), 'yyyy-MM-dd') : '';
+    const key = storeId + '|' + dateStr;
+    seen[key] = (seen[key] || 0) + 1;
+    dups.push([seen[key] > 1]);
+
+    const existing = sheet.getRange(i + 2, 10).getValue();
+    checks.push([existing === '' || existing === null ? false : existing]);
+  });
+
+  sheet.getRange(2, 7, n, 1).setValues(logIds);
+  sheet.getRange(2, 8, n, 1).setValues(names);
+  sheet.getRange(2, 9, n, 1).setValues(dups);
+  sheet.getRange(2, 10, n, 1).setValues(checks);
+}
+
+// ===========================================================================
+// 3. monthly_summary 전체 재계산 (C1=기준연도, E1=기준월 기준)
+// ===========================================================================
+function rebuildMonthlySummary() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(SHEET_SALES_LOGS);
-  const range = e.range; // 새로 추가된 응답 행
-  const row = range.getRow();
+  const sheet = ss.getSheetByName(SHEET_MONTHLY);
+  const storesSheet = ss.getSheetByName(SHEET_STORES);
+  const logsSheet = ss.getSheetByName(SHEET_SALES_LOGS);
 
-  // J열(확인여부)이 비어 있으면 기본값 FALSE
-  const jCell = sheet.getRange(row, 10);
-  if (jCell.getValue() === '') {
-    jCell.setValue(false);
+  const year = sheet.getRange('C1').getValue();
+  const month = sheet.getRange('E1').getValue();
+  const monthStart = new Date(year, month - 1, 1);
+  const monthEnd = new Date(year, month, 0);
+  const today = new Date();
+  const cmpEnd = today < monthEnd ? today : monthEnd;
+  const cmpDays = cmpEnd < monthStart ? 0 : cmpEnd.getDate();
+  const tz = Session.getScriptTimeZone();
+  const todayKey = Utilities.formatDate(today, tz, 'yyyy-MM-dd');
+
+  const stores = storesSheet.getRange(2, 1, Math.max(storesSheet.getLastRow() - 1, 0), 8).getValues()
+    .filter(r => r[0] && r[6] === 'active');
+
+  const logsLastRow = logsSheet.getLastRow();
+  const logs = logsLastRow >= 2
+    ? logsSheet.getRange(2, 1, logsLastRow - 1, 9).getValues() // A~I
+    : [];
+
+  // store_id -> { dateKey -> {status, sales, dup} } (dup인 행은 status/sales 집계에서 제외하되 표시는 남김)
+  const byStore = {};
+  logs.forEach(row => {
+    const [, storeId, saleDate, status, sales, , , , dup] = row;
+    if (!storeId || !saleDate) return;
+    const dateKey = Utilities.formatDate(new Date(saleDate), tz, 'yyyy-MM-dd');
+    byStore[storeId] = byStore[storeId] || {};
+    const cell = byStore[storeId][dateKey] || { hasNonDup: false, status: null, sales: 0, hasDup: false };
+    if (dup === true) {
+      cell.hasDup = true;
+    } else {
+      cell.hasNonDup = true;
+      cell.status = status;
+      cell.sales = (cell.sales || 0) + (Number(sales) || 0);
+    }
+    byStore[storeId][dateKey] = cell;
+  });
+
+  function monthSalesAndCounts(storeId, fromDate, toDate) {
+    const days = byStore[storeId] || {};
+    let sales = 0, workDays = 0, offDays = 0, uniqueInputDays = 0;
+    Object.keys(days).forEach(dateKey => {
+      const d = new Date(dateKey);
+      if (d < fromDate || d > toDate) return;
+      const cell = days[dateKey];
+      if (!cell.hasNonDup) return;
+      uniqueInputDays++;
+      if (cell.status === '영업') { workDays++; sales += cell.sales; }
+      else if (cell.status === '휴무') { offDays++; }
+    });
+    return { sales, workDays, offDays, uniqueInputDays };
   }
 
-  checkDuplicateAndNotify_(sheet, row);
-}
+  const out = [];
+  stores.forEach(s => {
+    const storeId = s[0], consultant = s[1], name = s[2];
+    if (monthStart > today) {
+      out.push({ storeId, consultant, name, inputRate: 0, missingDays: 0, offDays: 0, workDays: 0,
+        monthSales: 0, dailyAvg: '', mom: '', days: Array(31).fill('') });
+      return;
+    }
+    const cur = monthSalesAndCounts(storeId, monthStart, cmpEnd);
+    const inputRate = cmpDays > 0 ? cur.uniqueInputDays / cmpDays : 0;
+    const missingDays = cmpDays - cur.uniqueInputDays;
+    const dailyAvg = cur.workDays > 0 ? cur.sales / cur.workDays : '';
 
-/**
- * 새로 제출된 행이 같은 store_id + 영업일 기준으로 중복인지 확인하고,
- * 중복이면 관리자에게 알림(Spreadsheet 알림 + 선택적으로 이메일)을 보낸다.
- * I열(중복여부) 수식이 이미 TRUE/FALSE를 계산하므로 그 결과를 그대로 읽는다.
- */
-function checkDuplicateAndNotify_(sheet, row) {
-  const storeId = sheet.getRange(row, 2).getValue();
-  const saleDate = sheet.getRange(row, 3).getValue();
-  const isDup = sheet.getRange(row, 9).getValue(); // I열, 수식이 채워질 시간이 필요할 수 있음
+    const prevMonthStart = new Date(year, month - 2, 1);
+    const prevMonthEnd0 = new Date(year, month - 1, 0);
+    const prevEnd = new Date(year, month - 2, Math.min(cmpDays, prevMonthEnd0.getDate()));
+    const prev = monthSalesAndCounts(storeId, prevMonthStart, prevEnd);
+    const mom = prev.sales === 0 ? '데이터부족' : (cur.sales - prev.sales) / prev.sales;
 
-  if (isDup === true) {
-    const companyName = sheet.getRange(row, 8).getValue();
-    const msg = `[중복 입력 감지] ${companyName} (${storeId}) - ${saleDate}`;
-    Logger.log(msg);
-    // 필요 시 이메일 알림 활성화:
-    // MailApp.sendEmail('admin@example.com', '중복 입력 감지', msg);
+    const days = [];
+    for (let day = 1; day <= 31; day++) {
+      const d = new Date(year, month - 1, day);
+      if (d.getMonth() !== month - 1) { days.push('---'); continue; }
+      if (d > today) { days.push(''); continue; }
+      const dateKey = Utilities.formatDate(d, tz, 'yyyy-MM-dd');
+      const cell = (byStore[storeId] || {})[dateKey];
+      if (!cell) { days.push('미입력'); continue; }
+      if (cell.hasDup) { days.push('중복확인'); continue; }
+      if (!cell.hasNonDup) { days.push('미입력'); continue; }
+      if (cell.status === '휴무') { days.push('휴무'); continue; }
+      days.push(cell.sales);
+    }
+
+    out.push({ storeId, consultant, name, inputRate, missingDays, offDays: cur.offDays,
+      workDays: cur.workDays, monthSales: cur.sales, dailyAvg, mom, days });
+  });
+
+  const startRow = 4;
+  const rows = out.map(r => [
+    r.storeId, r.consultant, r.name, r.inputRate, r.missingDays, r.offDays,
+    r.workDays, r.monthSales, r.dailyAvg, r.mom, ...r.days,
+  ]);
+  if (rows.length > 0) {
+    sheet.getRange(startRow, 1, rows.length, rows[0].length).setValues(rows);
+  }
+  // 매장 수가 줄어든 경우를 대비해 남는 행 정리
+  const lastRow = sheet.getLastRow();
+  if (lastRow > startRow + rows.length - 1) {
+    sheet.getRange(startRow + rows.length, 1, lastRow - (startRow + rows.length) + 1, 41).clearContent();
   }
 }
 
-/**
- * missing_check 탭 A5의 HSTACK/LET 수식이 일부 Sheets 환경에서
- * 배열 조건(COUNTIFS에 범위 인자로 배열을 넣는 방식)을 지원하지 않아
- * 오류가 날 경우 사용하는 Apps Script 기반 대체 구현.
- * 메뉴: 일매출관리 > 2. 미제출 매장 새로고침(스크립트 방식)
- */
+// ===========================================================================
+// 4. missing_check 재계산
+// ===========================================================================
 function refreshMissingCheck() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const storesSheet = ss.getSheetByName(SHEET_STORES);
   const logsSheet = ss.getSheetByName(SHEET_SALES_LOGS);
-  const checkSheet = ss.getSheetByName('missing_check');
+  const checkSheet = ss.getSheetByName(SHEET_MISSING);
+  const tz = Session.getScriptTimeZone();
 
   const checkDate = checkSheet.getRange('B1').getValue();
-  const checkDateStr = Utilities.formatDate(new Date(checkDate), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  const checkDateStr = Utilities.formatDate(new Date(checkDate), tz, 'yyyy-MM-dd');
 
-  const storesLastRow = storesSheet.getLastRow();
-  const storesData = storesSheet.getRange(2, 1, storesLastRow - 1, 8).getValues();
-  // A store_id, B 담당컨설턴트, C 업체명, D 점주명, E 연락처, F 지역, G 상태, H 입력링크
+  const storesData = storesSheet.getRange(2, 1, Math.max(storesSheet.getLastRow() - 1, 0), 8).getValues();
 
   const logsLastRow = logsSheet.getLastRow();
   const submittedIds = new Set();
+  let todaySales = 0;
   if (logsLastRow >= 2) {
-    const logsData = logsSheet.getRange(2, 2, logsLastRow - 1, 2).getValues(); // B store_id, C 영업일
-    logsData.forEach(([storeId, saleDate]) => {
+    const logsData = logsSheet.getRange(2, 2, logsLastRow - 1, 8).getValues(); // B~I
+    logsData.forEach(([storeId, saleDate, status, sales, , , , dup]) => {
       if (!storeId || !saleDate) return;
-      const d = Utilities.formatDate(new Date(saleDate), Session.getScriptTimeZone(), 'yyyy-MM-dd');
-      if (d === checkDateStr) submittedIds.add(storeId);
+      const d = Utilities.formatDate(new Date(saleDate), tz, 'yyyy-MM-dd');
+      if (d !== checkDateStr) return;
+      submittedIds.add(storeId);
+      if (dup !== true && status === '영업') todaySales += Number(sales) || 0;
     });
   }
 
@@ -186,31 +307,134 @@ function refreshMissingCheck() {
     .filter(row => row[6] === 'active' && !submittedIds.has(row[0]))
     .map(row => [row[1], row[2], row[4], checkDateStr, row[7], row[6]]);
 
-  // 5행부터 기존 결과 영역 초기화 후 다시 작성
-  const clearRows = Math.max(checkSheet.getLastRow() - 4, 0);
-  if (clearRows > 0) {
-    checkSheet.getRange(5, 1, clearRows, 6).clearContent();
-  }
+  const lastRow = checkSheet.getLastRow();
+  if (lastRow >= 5) checkSheet.getRange(5, 1, lastRow - 4, 6).clearContent();
   if (missingRows.length === 0) {
     checkSheet.getRange('A5').setValue('오늘 미제출 매장 없음');
   } else {
     checkSheet.getRange(5, 1, missingRows.length, 6).setValues(missingRows);
   }
 
+  const activeCount = storesData.filter(r => r[6] === 'active').length;
   checkSheet.getRange('B2').setValue(submittedIds.size);
-  checkSheet.getRange('D2').setValue(
-    storesData.filter(r => r[6] === 'active').length - submittedIds.size
-  );
+  checkSheet.getRange('D2').setValue(activeCount - submittedIds.size);
+  checkSheet.getRange('F2').setValue(todaySales);
+
+  return { activeCount, submitted: submittedIds.size, missing: missingRows, todaySales, checkDateStr };
 }
 
-/**
- * 스프레드시트를 열 때 커스텀 메뉴를 추가한다.
- */
+// ===========================================================================
+// 5. dashboard 재계산 (missing_check 결과 + monthly_summary 결과를 재사용)
+// ===========================================================================
+function refreshDashboard() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const dash = ss.getSheetByName(SHEET_DASHBOARD);
+  const missing = refreshMissingCheck();
+
+  dash.getRange('B3').setValue(new Date(missing.checkDateStr));
+  dash.getRange('A6').setValue(missing.activeCount);
+  dash.getRange('B6').setValue(missing.submitted);
+  dash.getRange('C6').setValue(missing.missing.length);
+  dash.getRange('D6').setValue(missing.todaySales);
+
+  const monthlySheet = ss.getSheetByName(SHEET_MONTHLY);
+  const monthlyLastRow = monthlySheet.getLastRow();
+  let monthTotal = 0;
+  const byConsultant = {};
+  if (monthlyLastRow >= 4) {
+    const rows = monthlySheet.getRange(4, 1, monthlyLastRow - 3, 8).getValues(); // A~H
+    rows.forEach(([storeId, consultant, , , , , , monthSales]) => {
+      if (!storeId) return;
+      monthTotal += Number(monthSales) || 0;
+      byConsultant[consultant] = byConsultant[consultant] || { stores: 0, sales: 0 };
+      byConsultant[consultant].stores++;
+      byConsultant[consultant].sales += Number(monthSales) || 0;
+    });
+  }
+  dash.getRange('E6').setValue(monthTotal);
+  dash.getRange('F6').setValue(missing.activeCount > 0 ? missing.submitted / missing.activeCount : 0);
+  dash.getRange('F6').setNumberFormat('0%');
+
+  const storesSheet = ss.getSheetByName(SHEET_STORES);
+  const storesData = storesSheet.getRange(2, 1, Math.max(storesSheet.getLastRow() - 1, 0), 7).getValues();
+  const missingByConsultant = {};
+  missing.missing.forEach(([consultant]) => {
+    missingByConsultant[consultant] = (missingByConsultant[consultant] || 0) + 1;
+  });
+  const consultants = [...new Set(storesData.filter(r => r[6] === 'active').map(r => r[1]))];
+
+  const rows = consultants.map(c => {
+    const storeCount = storesData.filter(r => r[6] === 'active' && r[1] === c).length;
+    const missingCount = missingByConsultant[c] || 0;
+    return [c, storeCount, storeCount - missingCount, missingCount, (byConsultant[c] || {}).sales || 0];
+  });
+
+  const lastRow = dash.getLastRow();
+  if (lastRow >= 10) dash.getRange(10, 1, lastRow - 9, 5).clearContent();
+  if (rows.length > 0) dash.getRange(10, 1, rows.length, 5).setValues(rows);
+}
+
+// ===========================================================================
+// 6. 통합 재계산 (메뉴/트리거 공용)
+// ===========================================================================
+function refreshAll() {
+  recomputeSalesLogs_();
+  rebuildMonthlySummary();
+  refreshMissingCheck();
+  refreshDashboard();
+}
+
+// ===========================================================================
+// 7. 트리거 핸들러
+// ===========================================================================
+function onFormSubmitHandler(e) {
+  refreshAll();
+  notifyIfDuplicate_();
+}
+
+function dailyAutoRefresh() {
+  const missingSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_MISSING);
+  missingSheet.getRange('B1').setValue(new Date());
+  refreshAll();
+  sendMissingSummaryEmail_();
+}
+
+function notifyIfDuplicate_() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_SALES_LOGS);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  const isDup = sheet.getRange(lastRow, 9).getValue();
+  if (isDup === true) {
+    const storeId = sheet.getRange(lastRow, 2).getValue();
+    const companyName = sheet.getRange(lastRow, 8).getValue();
+    Logger.log(`[중복 입력 감지] ${companyName} (${storeId})`);
+  }
+}
+
+function sendMissingSummaryEmail_() {
+  if (!ADMIN_EMAIL) return;
+  const checkSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_MISSING);
+  const lastRow = checkSheet.getLastRow();
+  if (lastRow < 5) return;
+  const rows = checkSheet.getRange(5, 1, lastRow - 4, 6).getValues();
+  if (rows.length === 1 && rows[0][0] === '오늘 미제출 매장 없음') return;
+  const body = rows.map(r => `${r[0]} | ${r[1]} | ${r[2]}`).join('\n');
+  MailApp.sendEmail(ADMIN_EMAIL, '[일매출] 오늘 미제출 매장 안내', body);
+}
+
+// ===========================================================================
+// 8. 메뉴
+// ===========================================================================
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('일매출관리')
-    .addItem('0. Google Form 실제로 생성하기', 'createSalesForm')
-    .addItem('1. 매장별 입력링크 다시 생성', 'generateStoreLinks')
-    .addItem('2. 미제출 매장 새로고침(스크립트 방식)', 'refreshMissingCheck')
+    .addItem('0. 전체 자동 설정 (Form 생성 + 트리거 설치)', 'setupAll')
+    .addSeparator()
+    .addItem('1. monthly_summary 새로고침', 'rebuildMonthlySummary')
+    .addItem('2. missing_check 새로고침', 'refreshMissingCheck')
+    .addItem('3. dashboard 새로고침', 'refreshDashboard')
+    .addItem('4. 전체 새로고침', 'refreshAll')
+    .addSeparator()
+    .addItem('5. 매장별 입력링크 다시 생성', 'generateStoreLinks')
     .addToUi();
 }

@@ -1,86 +1,81 @@
-# 일매출 관리 시스템 (MVP)
+# 일매출 관리 시스템 v2
 
-이관 문서 기준으로 실제 구현한 결과물입니다.
+Google Sheets + Apps Script 강화판. v1(legacy/ 폴더)에서 쓰던 LET/HSTACK/MAP 같은
+고급 배열 수식을 전부 걷어내고, 집계·중복체크·미제출체크·대시보드를 Apps Script가
+값으로 계산해서 채우는 방식으로 다시 짰습니다.
 
-## 분석 결과 요약
+## v1 → v2 핵심 변경
 
-- 전체 구조(Form → sales_logs → monthly_summary / missing_check)는 설계상 문제 없음.
-- 이관 문서에 두 가지 버전(초안 + GPT 검수 후 최종본)이 있었는데, 내용은 동일하며
-  `missing_check` 기준 셀이 설계상 C1이었으나 실제 파일은 **B1**으로 굳어진 점만 차이가 있음.
-  → 이 구현에서는 **B1 기준으로 통일**했습니다 (`확인일` 레이블은 A1, 값은 B1).
-- 수식 자체(ARRAYFORMULA/MAP/LET/HSTACK/FILTER/COUNTUNIQUE)는 모두 Google Sheets 전용이며
-  Excel에서는 작동하지 않습니다. xlsx 파일에는 텍스트로 기록되어 있고, **Google Sheets로 열어야**
-  정상 계산됩니다.
-- `missing_check`의 `COUNTIFS(... , stores!$A$2:$A$200, ...)` 부분은 두 번째 인자에 배열을 넘기는
-  비표준 사용법이라 일부 환경에서 `#N/A`/`#ERROR!`가 날 수 있습니다. 이를 대비해 Apps Script
-  기반 대체 구현(`refreshMissingCheck`)을 추가했습니다.
+| 항목 | v1 | v2 |
+|---|---|---|
+| 중복여부(sales_logs I열) | MAP+LAMBDA 수식 | Apps Script가 값으로 계산 |
+| monthly_summary 31일 그리드 | 셀마다 LET/COUNTIFS 중첩 수식 | `rebuildMonthlySummary()`가 전부 계산해서 값으로 씀 |
+| missing_check | HSTACK+LET+배열 COUNTIFS | `refreshMissingCheck()`가 계산 |
+| 한눈에 보기 | 없음 | `dashboard` 탭 신규 — 오늘 현황 KPI + 컨설턴트별 표 |
+| 자동화 | 수동 메뉴 실행 | Form 제출 시 자동 트리거 + 매일 23:50 자동 새로고침 |
+| Form 생성 | 수동 안내 | `setupAll()` 한 번 실행으로 Form 생성+트리거 설치+초기 계산까지 자동 |
 
-## 만든 것
+수식을 값으로 바꾼 이유: LET/HSTACK/MAP은 Google Sheets 버전·지역 설정에 따라
+지원 여부가 달라 오류가 잦았습니다. 스크립트로 계산하면 항상 같은 결과가 나오고,
+Form 제출마다 자동으로 다시 계산되어 "새로고침을 잊어서 숫자가 안 맞는" 문제도 없습니다.
+
+## 구성
 
 ```
-scripts/generate_template.py   xlsx 템플릿 생성 스크립트 (4개 탭, 수식, 조건부 서식, 데이터 검증 포함)
-output/일매출관리시스템_템플릿.xlsx   생성된 템플릿 파일 (S001~S018 매장 데이터 포함)
-apps_script/Code.gs             Apps Script 모음
+scripts/generate_template.py   xlsx 템플릿 생성 스크립트 (구조/예시데이터/조건부서식만 담음)
+output/일매출관리시스템_템플릿.xlsx   생성된 템플릿
+apps_script/Code.gs             전체 자동화 스크립트 (집계/대시보드/Form생성/트리거)
+legacy/                         v1 (수식 기반) 백업 — 참고용, 더 이상 사용 안 함
 ```
 
-### `output/일매출관리시스템_템플릿.xlsx`
+## 탭 구성
 
-이관 문서 3장(탭별 컬럼 구조)·5장(확정 수식)·6장(조건부 서식) 그대로 구현:
+- **dashboard**(신규) — 기준일, 활성 매장수/오늘 제출/오늘 미제출/오늘 매출합/이번달 매출합/입력률
+  KPI 6개, 컨설턴트별 현황 표. `refreshDashboard()`가 채움.
+- **stores** — 매장 마스터 (변경 없음)
+- **sales_logs** — A~F는 Form 응답, G~J는 `recomputeSalesLogs_()`가 값으로 채움 (수식 없음)
+- **monthly_summary** — C1/E1 기준 연월, `rebuildMonthlySummary()`가 전체 계산
+- **missing_check** — B1 기준일, `refreshMissingCheck()`가 계산
+- **사용예시_가이드** — 맨 앞 탭, 설정 순서와 예시 데이터 설명
 
-- **stores**: A:H, store_id(S001~S018) + 상태 active/inactive 드롭다운 검증
-- **sales_logs**: A:K, G/H/I 수식 자동 채움(2행), D열 영업/휴무 드롭다운, J열 TRUE/FALSE 드롭다운,
-  조건부 서식(중복 빨간 배경, 영업인데 0원 빨간 텍스트)
-- **monthly_summary**: C1=기준연도(2026)/E1=기준월(6), 3행 헤더, 4~21행(18개 매장)에
-  A~J 및 K~AO(1~31일) 수식 전부 채움, 조건부 서식(휴무/미입력/중복확인/--- 색상, 오늘 날짜 열 강조,
-  전월대비 빨강/파랑)
-- **missing_check**: B1=확인일(`=TODAY()`), 2행 요약 통계, A5에 HSTACK 수식
+## 자동화 흐름
 
-### `apps_script/Code.gs`
+```
+Form 제출
+  → onFormSubmitHandler 트리거
+  → recomputeSalesLogs_() (log_id/업체명/중복여부/확인여부)
+  → rebuildMonthlySummary() / refreshMissingCheck() / refreshDashboard()
+  → (중복이면) 로그 기록
 
-- `generateStoreLinks()` — stores H열에 매장별 pre-filled Form 링크 자동 생성
-  (사용 전 `FORM_ENTRY_ID`, `FORM_BASE_URL`을 실제 값으로 교체 필요)
-- `onFormSubmit(e)` — Form 제출 시 J열(확인여부) 기본값 FALSE 자동 채움 + 중복 입력 로그 알림
-- `refreshMissingCheck()` — `missing_check`의 HSTACK/LET 수식이 오류를 낼 경우 쓰는 스크립트 기반 대체본
-- `onOpen()` — 스프레드시트 메뉴에 "일매출관리" 메뉴 추가
+매일 23:50
+  → dailyAutoRefresh 시간 트리거
+  → missing_check 기준일을 오늘로 갱신 + 전체 재계산
+  → ADMIN_EMAIL이 설정돼 있으면 미제출 매장 요약 이메일 발송
+```
 
-## 예시 데이터로 채워봤습니다
-
-빈 템플릿만으로는 작동 방식을 가늠하기 어려워서, `sales_logs` 2~5행에 이관 문서
-테스트 시나리오 데이터를 직접 넣어뒀습니다. Google Sheets로 열면 G/H/I열 수식이
-이 데이터를 자동으로 계산합니다. `사용예시_가이드` 탭(맨 앞)에 "Google Sheets로
-열었을 때 monthly_summary/missing_check에 어떤 값이 나와야 정상인지" 손계산 결과를
-정리해뒀으니, 실제로 연 결과와 비교해보면 수식이 제대로 작동하는지 바로 확인됩니다.
-
-실제 운영을 시작하기 전에는 이 예시 4줄을 지우고, `missing_check`의 B1을
-`=TODAY()`로 바꿔야 합니다(현재는 예시 비교를 위해 2026-06-01로 고정해둠).
-
-## Google Form, 실제로는 어떻게 만드나
-
-저(AI)는 구글 계정 로그인이나 OAuth 동의를 할 수 없는 환경이라 Form을 직접
-만들 수는 없습니다. 대신 **`apps_script/Code.gs`의 `createSalesForm()`을 동진님
-계정에서 한 번 실행하면, 동진님 권한으로 실제 Google Form이 코드로 자동 생성**됩니다.
-이 방식이 사람이 손으로 Form 질문을 하나씩 만드는 것보다 안전합니다(질문 순서/분기
-설정 실수가 없음). `stores` H열의 현재 값은 "형식 예시"일 뿐이며, `createSalesForm()`
-실행 시 실제 동작하는 pre-filled 링크로 자동 교체됩니다.
-
-## 사용자가 해야 할 작업 (Google 계정에서만 가능)
+## 사용자가 해야 할 작업
 
 1. `output/일매출관리시스템_템플릿.xlsx`를 Google Drive에 업로드 → "Google Sheets로 열기"
-2. `사용예시_가이드` 탭과 비교해서 monthly_summary/missing_check가 예상대로 나오는지 확인
-3. `stores` 탭 매장명 오타 확인 (이미지 기반 입력이라 원본 대조 필요)
-4. 확장자 도구 > Apps Script 편집기를 열고 `apps_script/Code.gs` 전체를 붙여넣기
-5. 메뉴 새로고침(시트 새로고침 또는 재실행 권한 승인) 후 "일매출관리 > 0. Google Form
-   실제로 생성하기" 실행 → 실제 Form 생성 + `sales_logs` 자동 재구성 + `stores` H열에
-   진짜 pre-filled 링크 자동 채움
-   - 실행 전 `sales_logs`에 남겨둔 예시 데이터(2~5행)는 백업하거나 지우고 실행할 것
-     (응답 탭이 새로 생기면서 기존 `sales_logs`를 대체하기 때문)
-6. 생성된 stores!H열 링크를 매장별로 점주에게 카카오톡 공유
-7. (선택) Apps Script 트리거 > `onFormSubmit` 함수를 "양식 제출 시" 트리거로 추가하면
-   응답이 들어올 때마다 확인여부(J열) 기본값과 중복 알림이 자동 처리됨
+2. `사용예시_가이드` 탭에서 안내 확인, `stores` 탭 매장명 오타 확인
+3. 확장 프로그램 > Apps Script 편집기 → `apps_script/Code.gs` 전체를 붙여넣고 저장
+4. (선택) `ADMIN_EMAIL` 상수에 본사 이메일을 넣으면 매일 미제출 요약을 받음
+5. 시트로 돌아와 새로고침 → 메뉴 **일매출관리** 표시 확인
+6. **[일매출관리 > 0. 전체 자동 설정]** 실행
+   - 처음 실행 시 권한 승인 팝업이 뜸 (정상)
+   - 실행 전 `sales_logs`의 예시 데이터(2~5행)는 백업하거나 지울 것
+     (Form 연결 시 응답 탭이 새로 생기며 `sales_logs`를 대체하기 때문)
+   - 실행 후: 실제 Google Form 생성, `stores!H열`에 진짜 pre-filled 링크 생성,
+     `onFormSubmit`/매일 23:50 트리거 설치, dashboard/monthly_summary/missing_check
+     초기 계산까지 한 번에 완료됨
+7. `stores!H열` 링크를 매장별로 점주에게 카카오톡 공유
+8. 이후로는 그냥 두면 됨 — Form 제출마다, 그리고 매일 밤 자동으로 전부 갱신됨
 
-## 알려진 제약 / 확인 필요 사항
+수동으로 다시 계산하고 싶을 때는 메뉴의 1~4번 항목을 사용하면 됩니다.
 
-- xlsx → Google Sheets 변환 시 조건부 서식 일부가 깨질 수 있음 (특히 FormulaRule 기반 규칙) → 업로드 후 재확인 필요.
-- `missing_check` A5 수식이 오류 나면 `refreshMissingCheck()` Apps Script로 대체.
-- `monthly_summary`는 현재 매장 18개 기준 4~21행까지만 생성됨. 매장이 50개로 늘어나면
-  21행 이후로 수식을 복사(드래그)해서 확장해야 함.
+## 알려진 제약
+
+- `createSalesForm()`/`setupAll()`은 AI가 아니라 동진님 Google 계정에서 실행되어야
+  실제 Form이 생성됩니다(이 환경은 구글 로그인을 할 수 없음).
+- xlsx → Google Sheets 변환 시 조건부 서식 일부가 깨질 수 있음 → 업로드 후 확인 필요.
+- 매장이 50개로 늘어나도 `rebuildMonthlySummary()`는 active 매장 전체를 자동으로
+  다시 깔아주므로 행 추가를 수동으로 할 필요 없음 (stores 탭에 매장만 추가하면 됨).
