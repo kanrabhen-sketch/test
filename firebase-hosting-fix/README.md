@@ -1,154 +1,168 @@
-# 푸드의비서 Google 로그인 장애 — 조사 결과와 배포 구성
+# 푸드의비서 Google 로그인 장애 — 원인, 경위, 이전 결과
 
 대상 앱: https://foobierp.ai.studio
-Firebase 프로젝트: `radiant-badge-xfs6l` (프로젝트 번호 99186442110)
-조사일: 2026-07-27
+조사·이전일: 2026-07-27 ~ 2026-07-28
 
-## 요약
+## 결론
 
-로그인이 깨지는 원인은 확인했으나, **현재 계정 권한으로는 수정할 수 없다.**
-프로젝트가 Google AI Studio가 생성·소유한 managed project이고,
-`kanrabhen@gmail.com`에게는 읽기 전용 역할만 부여되어 있다.
+기존 Firebase 프로젝트 `radiant-badge-xfs6l`에서는 로그인을 고칠 수 없어,
+정동진님 소유의 새 프로젝트 `foobierp-vy1v5`를 만들어 이전했다.
 
-수정 권한을 가진 주체는 AI Studio 쪽이므로, 해결은 AI Studio를 통해 요청해야 한다.
+새 프로젝트에서는 `init.json`이 정상 생성되어 로그인 차단 요인이 해소됐다.
 
-## 원인 (확인 완료)
+## 원인
 
-Google 로그인 팝업은 `authDomain`인 `radiant-badge-xfs6l.firebaseapp.com`의
-인증 핸들러 페이지를 연다. 그 페이지가 로드하는 `handler.js`가
-`/__/firebase/init.json`을 읽어 초기화하는데, 이 파일이 없다.
+Google 로그인 팝업은 `authDomain`의 인증 핸들러 페이지를 연다.
+그 페이지의 `handler.js`가 `/__/firebase/init.json`을 읽어 초기화하는데,
+Firebase Hosting에 한 번도 배포된 적이 없어 이 파일이 없었다.
+초기화에 실패하니 로그인 결과가 앱으로 전달되지 못하고 팝업이 즉시 닫혔다.
 
-Firebase Hosting에 한 번도 배포된 적이 없어서 해당 경로가
-Hosting의 "Site Not Found" 페이지를 반환한다. 초기화에 실패하니
-로그인 결과가 앱으로 전달되지 못하고 팝업이 즉시 닫힌다.
+`handler.js`(280KB)에서 해당 경로 참조를 확인했고,
+응답 본문이 Hosting의 "Site Not Found" 페이지인 것도 확인했다.
+`/__/auth/handler`, `/__/auth/iframe`, `/__/auth/experiments.js`는 모두 200으로 정상이었다.
 
-검증 내역:
+## 기존 프로젝트에서 막힌 이유
 
-| 확인 항목 | 결과 |
-|---|---|
-| `handler.js`(280KB) 내 `/__/firebase/init.json` 참조 | 존재함 |
-| `firebaseapp.com/__/firebase/init.json` | 404, 본문은 Hosting "Site Not Found" 페이지 |
-| `firebaseapp.com/__/auth/handler` | 200 (정상) |
-| `firebaseapp.com/__/auth/iframe` | 200 (정상) |
-| `firebaseapp.com/__/auth/experiments.js` | 200 (정상) |
-| `radiant-badge-xfs6l.web.app/` | 404 (배포 이력 없음) |
-| 승인된 도메인에 `foobierp.ai.studio` | 등록되어 있음 |
-| 앱 번들의 Firebase 설정 | projectId·authDomain 모두 `radiant-badge-xfs6l` |
-
-즉 Hosting에 아무 파일이나 한 번 배포하면 `init.json`이 생성되어 해결된다.
-문제는 그 배포를 할 권한이 없다는 것이다.
-
-## 막힌 경로들 (모두 실측)
-
-### 1. Firebase Hosting 배포 — 권한 없음
+`radiant-badge-xfs6l`은 AI Studio가 생성해 Google이 소유·관리하는 managed project이고,
+`kanrabhen@gmail.com`에게는 읽기 전용 역할만 부여되어 있었다.
 
 ```
 POST https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/radiant-badge-xfs6l/versions
 → 403 {"error":{"code":403,"message":"The caller does not have permission","status":"PERMISSION_DENIED"}}
 
-POST https://cloudresourcemanager.googleapis.com/v1/projects/radiant-badge-xfs6l:testIamPermissions
-  body: {"permissions":["firebase.projects.get","firebasehosting.sites.update"]}
+POST cloudresourcemanager.googleapis.com/v1/projects/radiant-badge-xfs6l:testIamPermissions
+  {"permissions":["firebase.projects.get","firebasehosting.sites.update"]}
 → 403 USER_PROJECT_DENIED
-  "Caller does not have required permission to use project radiant-badge-xfs6l.
-   Grant the caller the roles/serviceusage.serviceUsageConsumer role, or a custom role
-   with the serviceusage.services.use permission"
 ```
 
-조회성 호출(프로젝트 조회, 사이트 조회, `projects:list`, `hosting:sites:list`)은
-전부 200으로 성공한다. 쓰기만 막힌다.
+부여된 역할은 로그 뷰어, 모니터링 뷰어, Cloud Datastore 사용자, Cloud Run 뷰어,
+Cloud SQL User, Firebase 뷰어, Firebase User, Managed Projects Deleter/Upgrader/Viewer,
+Run SaaS Namespace User 뿐이었다. 소유자·편집자·Firebase Hosting 관리자가 없고,
+IAM 목록에 사람 소유자가 아예 없어 권한을 요청할 대상도 없었다.
 
-### 2. IAM 자가 수정 — 권한 없음
+검토했으나 모두 막힌 경로:
 
-`kanrabhen@gmail.com`에게 부여된 역할:
-로그 뷰어, 모니터링 뷰어, Cloud Datastore 사용자, Cloud Run 뷰어,
-Cloud SQL User (Free Tier), Firebase 뷰어, Firebase User (Free Tier),
-Managed Projects Deleter / Upgrader / Viewer, Run SaaS Namespace User (Free Tier).
+| 시도 | 결과 |
+|---|---|
+| Hosting 직접 배포 | 403 PERMISSION_DENIED |
+| IAM 자가 역할 부여 | `setIamPolicy` 권한 없음 |
+| authDomain을 `foobierp.ai.studio`로 교체 | 해당 도메인은 SPA 폴백만 반환, 인증 핸들러 없음 |
+| GIS + signInWithCredential 우회 | OAuth 클라이언트에 출처 미등록(403), 등록 권한 없음 |
+| AI Studio 플랫폼에 배포 요청 | 플랫폼에 Hosting 프로비저닝 권한·기능 자체가 없다고 공식 회신 |
 
-소유자(Owner)·편집자(Editor)·Firebase Hosting 관리자 없음.
-`resourcemanager.projects.setIamPolicy`가 없어 스스로 역할을 추가할 수 없다.
+## 이전 내용
 
-IAM 목록의 나머지 주 구성원은 전부 Google 내부 서비스 계정이다
-(`alkali-makersuite@prod.google.com` — makersuite는 AI Studio의 옛 이름,
-`ais-sa@...`, `firebase-adminsdk-fbsvc@...`).
-**사람 소유자가 한 명도 없어 권한을 부탁할 대상 자체가 없다.**
+신규 프로젝트: **`foobierp-vy1v5`** (Foobi ERP, 프로젝트 번호 793652092378)
 
-### 3. authDomain 교체 — 불가능
+수행한 작업:
 
-`foobierp.ai.studio/__/firebase/init.json`은 200을 반환하지만
-본문이 앱의 `index.html`(SPA 폴백)이라 인증 핸들러로 쓸 수 없다.
-`web.app` 도메인도 같은 프로젝트라 동일하게 404.
+1. Firebase 프로젝트 생성 (생성자가 소유자)
+2. Firebase Hosting 배포 → `init.json` 생성 확인
+3. 웹 앱 등록 → appId 발급
+4. Firestore API·Identity Toolkit API 활성화
+5. Firestore 데이터베이스 생성 — 기존과 **동일한 이름**을 사용해
+   앱의 `firestoreDatabaseId` 상수는 수정 불필요
+   (`ai-studio-2ebc80c3-0c85-4e16-bcac-c4329e982059`, us-west1)
+6. 문서 19건 복사 (하위 컬렉션 없음)
+7. 보안 규칙 배포
 
-### 4. 팝업 우회 (Google Identity Services + signInWithCredential) — 막힘
-
-Google 공급자 설정은 조회에 성공했다.
-
-```
-GET https://identitytoolkit.googleapis.com/admin/v2/projects/radiant-badge-xfs6l/defaultSupportedIdpConfigs/google.com
-→ 200 { "enabled": true,
-        "clientId": "99186442110-lmja4k6cf8ooetj020qpede57uj4n8cm.apps.googleusercontent.com" }
-```
-
-그러나 GIS는 페이지 출처가 해당 OAuth 클라이언트의
-"승인된 JavaScript 원본"에 등록되어 있어야 동작한다. 확인 결과 미등록이다.
+검증 결과:
 
 ```
-GET https://accounts.google.com/gsi/status?client_id=<위 clientId>&origin=https://foobierp.ai.studio
-→ 403
-
-GET https://accounts.google.com/gsi/status?client_id=<위 clientId>&origin=https://radiant-badge-xfs6l.firebaseapp.com
-→ 403
+GET https://foobierp-vy1v5.firebaseapp.com/__/firebase/init.json  → 200 (JSON 정상)
+GET https://foobierp-vy1v5.firebaseapp.com/__/auth/handler        → 200
 ```
 
-원본을 추가하려면 OAuth 클라이언트 편집 권한(`clientauthconfig.clients.update`)이
-필요한데, 이 역시 없다.
+복사된 데이터:
 
-## 권장 해결 순서
+| 컬렉션 | 문서 수 |
+|---|---|
+| activity_logs | 4 |
+| clients | 2 |
+| projects | 5 |
+| resources | 1 |
+| tasks | 1 |
+| teams | 5 |
+| users | 1 |
 
-### 1순위 — AI Studio에 배포를 요청한다
+`users`의 유일한 문서(`kanrabhen@gmail.com`, `team_admin`, 활성)가
+문서 ID까지 그대로 이전됐다.
 
-이 프로젝트에 쓰기 권한을 가진 주체는 AI Studio다.
-AI Studio 채팅에 아래를 그대로 붙여넣어 요청한다.
+기존 프로젝트는 삭제하지 않았고 읽기만 했다. 언제든 되돌릴 수 있다.
 
-> 이 앱의 Firebase 프로젝트(radiant-badge-xfs6l)에 Firebase Hosting이 한 번도 배포되지 않아서
-> https://radiant-badge-xfs6l.firebaseapp.com/__/firebase/init.json 이 404를 반환하고,
-> 그 결과 Google 로그인 팝업이 초기화에 실패해 즉시 닫힌다.
-> Firebase Hosting에 최소 구성(index.html 한 개)으로 한 번 배포해서 init.json이 생성되게 해달라.
-> Firestore와 Authentication 설정·데이터는 건드리지 말고 Hosting만 배포해달라.
+## 보안 규칙 변경 (확인 필요)
 
-배포 후 아래가 200이고 JSON이 나오면 해결된 것이다.
+기존 프로젝트의 규칙은 다음과 같았다.
 
 ```
-curl -i https://radiant-badge-xfs6l.firebaseapp.com/__/firebase/init.json
+match /{document=**} {
+  allow read, write: if true; // Internal business app authenticated users rule
+}
 ```
 
-### 2순위 — 프로젝트 쓰기 권한을 확보한다
+주석은 "인증된 사용자"라고 되어 있으나 실제로는 **누구나 읽고 쓸 수 있는 상태**였다.
+API 키만 알면 사내 데이터 전체가 노출·변조 가능하다.
 
-AI Studio에서 이 프로젝트를 본인 소유로 전환하는 옵션이 있는지 확인한다
-(`Managed Projects Upgrader` 역할이 있는 것으로 보아 관련 기능이 존재할 가능성이 있다).
-불가능하면 Firebase 지원(https://firebase.google.com/support/troubleshooter/contact)에
-managed project의 Hosting 배포 권한을 요청한다.
+새 프로젝트에는 주석의 의도대로 다음 규칙을 배포했다.
 
-권한을 얻은 뒤에는 이 디렉터리에서 바로 배포하면 된다.
+```
+match /{document=**} {
+  allow read, write: if request.auth != null;
+}
+```
+
+앱의 모든 Firestore 접근이 로그인 이후에 일어나므로 동작에 문제가 없어야 한다.
+만약 이전 후 데이터가 안 보이는 증상이 생기면 `firestore.rules`의 조건을
+`if true`로 되돌려 원인을 분리할 수 있다. 다만 그 상태를 유지하는 것은 권장하지 않는다.
+
+## UID 변경 영향 — 없음
+
+앱은 로그인 후 사용자를 UID가 아니라 **이메일로 조회**한다.
+
+```js
+const email = user.email?.toLowerCase().trim() || "";
+const q = query(collection(db,"users"), where("email","==",email), limit(1));
+```
+
+따라서 새 프로젝트에서 UID가 새로 발급돼도 이메일이 같으면
+기존 문서를 찾아 역할·권한이 그대로 유지된다.
+관리자가 직원을 추가할 때도 UID가 아닌 자체 생성 ID를 쓰고 있어,
+문서 ID와 UID가 다른 상황을 앱이 이미 정상 처리한다.
+
+Firebase Storage는 설정 문자열만 있고 실제 사용처가 없어 이전 대상이 아니다.
+
+## 남은 작업 (콘솔·AI Studio에서 수동)
+
+### 1. Google 로그인 공급자 사용 설정
+
+https://console.firebase.google.com/project/foobierp-vy1v5/authentication/providers
+
+Authentication → 시작하기 → Google → 사용 설정 → 저장.
+
+API로는 OAuth 클라이언트를 자동 생성할 수 없어(`client_id cannot be empty`)
+콘솔에서 한 번 눌러야 한다. 이 동작이 Auth 초기화와 OAuth 클라이언트 생성을 함께 처리한다.
+
+### 2. 승인된 도메인에 앱 도메인 추가
+
+Authentication → Settings → 승인된 도메인 → `foobierp.ai.studio` 추가.
+
+### 3. 앱의 Firebase 설정 교체 (AI Studio)
+
+| 항목 | 기존 | 신규 |
+|---|---|---|
+| projectId | `radiant-badge-xfs6l` | `foobierp-vy1v5` |
+| appId | `1:99186442110:web:c7526be378cdfafb597d2f` | `1:793652092378:web:4c701082aa004f5d2ef4e3` |
+| apiKey | `AIzaSyDmcdmcV02iKY-lhnCco65f453LkCg_lhs` | `AIzaSyADfeeTDvvYQW_fy4pZQYwSQtEEAIueD4c` |
+| authDomain | `radiant-badge-xfs6l.firebaseapp.com` | `foobierp-vy1v5.firebaseapp.com` |
+| storageBucket | `radiant-badge-xfs6l.firebasestorage.app` | `foobierp-vy1v5.firebasestorage.app` |
+| messagingSenderId | `99186442110` | `793652092378` |
+| firestoreDatabaseId | `ai-studio-2ebc80c3-...` | **변경 없음** |
+
+## 이 디렉터리
+
+`firebase.json`과 `public/index.html`은 Hosting 배포에 사용한 최소 구성이다.
+재배포가 필요하면 다음을 실행한다.
 
 ```bash
-npm install -g firebase-tools
-firebase login
-firebase deploy --only hosting --project radiant-badge-xfs6l
+firebase deploy --only hosting --project foobierp-vy1v5
 ```
-
-`firebase.json`과 `public/index.html`은 이미 준비되어 있다.
-Hosting만 배포하며 Firestore·Authentication에는 영향이 없다.
-
-### 3순위 — 직접 소유하는 Firebase 프로젝트로 이전
-
-위가 모두 막힐 때의 최후 수단이다. 새 프로젝트를 만들면 소유자가 되므로
-Hosting 배포도 OAuth 설정도 자유롭다. 다만 Firestore 데이터 이전이 필요하고,
-기존 사용자 계정은 내보낼 권한이 없어 UID가 바뀐다.
-데이터가 UID를 키로 쓰고 있다면 영향이 크므로 사전 검토가 필요하다.
-
-## 참고
-
-- 이번 조사 중 Firestore·Authentication 설정과 데이터는 일절 변경하지 않았다.
-  수행한 쓰기 시도는 Hosting 배포 하나뿐이고 403으로 거부되어 기록된 변경이 없다.
-- 앱 번들에서 확인한 `apiKey`, `clientId`는 클라이언트에 노출되는 공개 값이다.
-  OAuth 클라이언트 시크릿은 조회하지 않았고 이 문서에도 포함하지 않았다.
